@@ -1,29 +1,70 @@
 # Telegram Username Checker Bot
 
 Standalone Python bot based on the username-checking idea credited to Charlie.
-Uses Telegram's official `account.checkUsername` method through Telethon rather
-than treating a missing t.me page or a word on Fragment as proof of availability.
-It checks basic **personal-account** usernames. It does not claim usernames,
-check private invite hashes, or guarantee availability for channels or bots.
+Both modes run in the same private bot. Neither mode claims usernames.
 
-## Features
+| Command | Method | Batch size | User-account login |
+| --- | --- | --- | --- |
+| `/botonly` | Public t.me page, then Fragment | 80 | Not required |
+| `/accountmode` or `/usermode` | Official Telegram account.checkUsername | 50 | Required |
 
-- Upload a UTF-8 `.txt` file: automatically checks 50 random usernames from anywhere in the list.
-- Press **Next 50**, or send `/next`, for another random batch of 50.
-- Each file entry is consumed once per allowed user, even across restarts and repeated uploads.
-- Case-insensitive deduplication: `Hello_AI`, `hello_ai`, and `@hello_ai` are one name.
-- Supports bare usernames, `@username`, and `https://t.me/username`, separated by lines, spaces, commas, or semicolons.
-- `/check hello_ai` checks one name; up to 50 names work in one command.
-- Reply `/check` to a text message or `.txt` document.
-- Plain `@username` or `t.me/username` also works in private chat.
-- `/status` shows queue counts; `/last` retrieves the most recent batch if delivery failed.
-- Separates available, taken, purchasable, invalid, unavailable-for-account, and unknown results.
-- Handles Telegram FloodWait without bypassing it; cooldown survives restart.
-- Private chat only, restricted to numeric IDs you configure.
+The selected mode is saved per allowed user and survives restart. The bot starts
+even without a checker user account. New users default to bot-only if no checker
+session file exists; existing installations with a session file default to account
+mode. Optional `DEFAULT_MODE` overrides the initial default. Explicit chat commands
+take precedence over that default.
+
+## Bot-only checks
+
+Send `/botonly`, then upload a .txt file, send `/next`, or `/check username`.
+No phone number, user-session file, OTP or QR login is used by this mode.
+API_ID, API_HASH and BOT_TOKEN are still needed because the chat interface uses
+Telethon authenticated as your **bot**.
+
+The public checker follows this sequence:
+
+1. Fetch https://t.me/username with a bounded HTTP request.
+2. Recognize a Telegram profile as taken. Otherwise require the requested
+   username in generic contact metadata and the exact visible sentence:
+   `If you have Telegram, you can contact @username right away.`
+3. Only for that generic contact page, fetch
+   https://fragment.com/username/username and inspect the asset status.
+4. Fragment **Available / On auction / For sale** means purchasable, not free.
+   **Taken / Sold** means collectible or unavailable. An explicit Fragment
+   **Unavailable** status plus the generic contact page is reported as
+   **likely available (web)**.
+
+Public pages cannot confirm Telegram will let you register a name. Fragment
+"Unavailable" only says it is not currently offered there. Reserved or otherwise
+unassignable usernames can still lack public profiles. Use account mode for the
+official, account-specific result.
+
+Timeouts, HTTP 403/404/5xx, redirects, blocked pages, wrong asset identities and
+unrecognized HTML are **unknown**, never available. HTTP 429 honors Retry-After
+and saves a separate public-check cooldown. No access challenges are bypassed.
+An unknown result or rate limit stops the batch and preserves unattempted entries.
+This may produce fewer than 80 results; a short final queue also produces a
+smaller batch. Public page layouts can change.
+
+## Commands and files
+
+- Upload a UTF-8 .txt file: checks 80 or 50 random usernames in the active mode.
+- **Next 80 / Next 50** or `/next`: another batch without repeats.
+- `/check hello_ai`: one name, or up to 80 in bot-only / 50 in account mode.
+- Reply `/check` to text or a .txt document. Plain @username or t.me/username also works.
+- `/status`: current mode, batch size and queue counts.
+- `/last`: recover the latest saved batch, including which mode it used.
+- `/help`: current commands and mode.
+
+Entries can be usernames, @usernames or https://t.me/username links, separated
+by lines, spaces, commas or semicolons. Invalid entries are counted and skipped.
+Limits: 20 MiB and 1,000,000 tokens per file. Candidate syntax is 5-32 ASCII
+letters/digits/underscores, starting with a letter. Telegram makes the final
+assignability decision. Private invite hashes are not usernames.
 
 ## Setup (Python 3.10+)
 
-Unzip the project, enter its directory, then:
+In the project directory:
 
 ```bash
 python -m venv .venv
@@ -32,10 +73,8 @@ python -m pip install -r requirements.txt
 cp .env.example .env
 ```
 
-On Windows, activate with `.venv\Scripts\activate` and copy `.env.example` to
-`.env` using Explorer or `copy .env.example .env` in Command Prompt.
-
-Edit `.env`:
+On Windows activate with `.venv\Scripts\activate` and copy .env.example to .env.
+Fill .env with your own values:
 
 ```dotenv
 API_ID=your_numeric_api_id
@@ -43,114 +82,79 @@ API_HASH=your_api_hash
 BOT_TOKEN=your_botfather_token
 ALLOWED_USER_IDS=your_numeric_telegram_user_id
 CHECK_DELAY=2.0
+WEB_CHECK_DELAY=1.0
 ```
 
-Get API credentials from <https://my.telegram.org/apps> and the bot token from
-[@BotFather](https://t.me/BotFather). The allowed ID is your user ID, not the
-bot's ID. Comma-separated IDs allow multiple people, each with their own queue.
-If you need to find your ID, start the configured bot with any numeric allowed
-ID and message it: the unauthorized response displays the sender's ID.
+Get API credentials from https://my.telegram.org/apps and the token from
+[@BotFather](https://t.me/BotFather). ALLOWED_USER_IDS is your numeric user ID,
+not the bot ID; multiple IDs are comma separated. The unauthorized private-chat
+response displays the sender's ID if you need to find yours.
 
-Perform the one-time checker-account login **in your own terminal**. QR login
-is the default, so you do not have to wait for a Telegram/SMS code:
-
-```bash
-python bot.py --login
-```
-
-On your already logged-in phone, open **Telegram > Settings > Devices > Link
-Desktop Device**, scan the terminal QR from another screen, and approve it.
-If the terminal QR is distorted, open the temporary local `data/login-qr.svg`
-image. This image refreshes when the token expires and is deleted when login
-finishes or is cancelled. A two-step verification password is requested only
-if your account requires one. QR login needs an existing logged-in Telegram
-app; it does not create a new Telegram account.
-
-For phone/code login instead:
-
-```bash
-python bot.py --login-code
-```
-
-The program displays the delivery method Telegram actually returned (Telegram
-service chat, SMS, call, email, or Fragment). If nothing arrives, enter `qr` at
-the code prompt to switch to QR login. Enter `resend` to request the next method
-**only if Telegram offered one and its timer has elapsed**; the script permits
-one explicit resend and never forces SMS or repeatedly requests codes.
-Unsupported official-app-only delivery and expired codes switch to QR login.
-`cancel` exits without completing login. FloodWait displays Telegram's required
-wait in seconds instead of hiding it behind a generic startup error.
-
-Telegram chooses delivery; a script cannot guarantee SMS. Only user accounts
-can call `account.checkUsername`; a bot token alone cannot provide this official
-check. The bot token provides the chat interface. The user session remains in
-the same `data/checker_user.session` file for both login methods and is reused
-when you restart. Never send your login code or 2FA password to another person.
-
-Then run:
+Start without a user-account login:
 
 ```bash
 python bot.py
 ```
 
-Open your bot's private chat, send `/start`, and upload your `.txt` file.
+In your bot's private chat send `/botonly`, then a file or `/check hello_ai`.
+No user-account client is constructed or connected for bot-only checks.
 
-Example `names.txt`:
+## Optional account mode
 
-```text
-abcai
-xyzai
-hello_ai
-@sample_name
-https://t.me/another_name
+For official checks, log in once **in your own terminal**:
+
+```bash
+python bot.py --login
 ```
 
-## How random selection and no repeats work
+On your already logged-in phone open **Telegram > Settings > Devices > Link
+Desktop Device**, scan the QR from another screen, and approve it. If the terminal
+QR is distorted, open the temporary local data/login-qr.svg image. The image
+refreshes on expiry and is removed after the flow exits. Two-step verification
+is requested if your account requires it.
 
-Each newly imported username receives a random priority in an indexed SQLite
-queue. Reading the next 50 priorities samples throughout the file, without
-rescanning or shuffling a huge file on every click. Random order is fixed for
-that queue; it is not sequential file order. New uploads add previously unseen
-names to the queue; pending names from earlier uploads remain there.
+For phone/code login use `python bot.py --login-code`. The prompt shows the
+delivery method Telegram returned. Enter `qr` if no code arrives, `resend`
+only when the offered timer permits it, or `cancel`. Only one explicit resend
+is allowed. Telegram controls delivery; the script does not force SMS.
 
-`data/progress.sqlite3` stores queue and history. **Preserve the entire `data/`
-directory** across restarts/deployments. `DATA_DIR` can point to a persistent
-volume. Run only one bot process against this directory.
+Restart with `python bot.py`, then send `/accountmode`. The official checker
+uses data/checker_user.session. Bot-only still works if that session is absent
+or expired. A bot account cannot call account.checkUsername. A true API response
+means available for the checker user account at that moment; false means
+unavailable for that account, not proof of a visible owner. Purchasable usernames
+are reported separately. Account checks are for basic personal-account usernames,
+not a guarantee of assignability to channels or bots.
 
-Manual `/check` explicitly rechecks a requested name if you send it again.
-Such checks also prevent that name from appearing in future automatic batches.
-There is no automatic history reset.
+## Queue and history
 
-An interrupted/network-failed attempt is saved as unknown and consumed instead
-of being silently repeated. A process crash between sending a Telegram request
-and saving its result cannot guarantee exactly-once network execution; the bot
-keeps the entry consumed and labels it interrupted. `/last` recovers saved
-results. You may explicitly `/check` an unknown name again.
+New usernames get random priorities in an indexed SQLite queue. Reading the
+next 80 or 50 priorities selects throughout the list without rescanning it on
+every click. Uploads add unseen names to the saved queue; older pending entries
+remain. Deduplication ignores case.
 
-FloodWait means Telegram rejected the check: that entry returns to the queue,
-the current batch stops, and you can request `/next` after the cooldown.
-Unattempted entries stay pending. This can produce a batch smaller than 50.
-The final batch is also smaller when fewer than 50 names remain. All-taken or
-all-available files still print every result, not only available names.
+Both modes share queue/history, so switching modes does not repeat attempted
+file entries. Manual `/check` explicitly allows rechecking in either mode,
+including verifying a web estimate in account mode. There is no automatic reset.
 
-## Limits and interpretation
+Results are saved before delivery; `/last` can recover them if delivery fails.
+An unknown/network-failed attempt is consumed instead of silently retried.
+After a crash an unfinished request becomes interrupted; exactly-once network
+execution cannot be guaranteed across a crash. Rate-limited requests that
+obtained no result return to the pending queue.
 
-- Files: maximum 20 MiB and 1,000,000 tokens. One entry per line is recommended.
-- Accepted candidate format: 5–32 ASCII letters/digits/underscores, beginning
-  with a letter. Telegram makes the final validity decision; some syntactically
-  valid candidates may be reserved or otherwise unassignable.
-- Invalid file entries are counted and skipped. Manual invalid names receive
-  an invalid result.
-- Default request spacing: 2 seconds, so 50 checks take about 100 seconds plus
-  network time. Telegram can still impose a longer wait; no rate is guaranteed.
-- One batch/import runs at a time across the bot because all users share the
-  same checker account. `/status` and `/last` still work while checking.
-- A true API response means available for the checker account **at that moment**.
-  A false response means unavailable for that account; it is not proof of a
-  publicly visible owner. Purchasable names are not free registrations.
-- Availability can change after checking. The bot never changes your username.
-- Protect `.env` and all `.session` files in `data/`: sessions provide account
-  access. Never upload these to a repository or send them to others.
+Preserve the entire data/ directory, including progress.sqlite3. DATA_DIR can
+point to a persistent volume. Run one process per directory. Existing databases
+are migrated without deleting names/results. Each person has their own mode
+and queue. One batch/import runs at a time; /status and /last remain available.
+
+Default API spacing is 2 seconds per name; public-page spacing is 1 second per
+HTTP request, up to two requests per name. These are not guaranteed safe rates.
+Telegram or Fragment may impose longer waits. CHECK_DELAY and WEB_CHECK_DELAY
+can increase the spacing (minimum 1 second).
+
+Keep .env and data/*.session private; sessions provide account access. Never
+share login codes or passwords. Availability can change after checking.
 
 ## Verification
 
@@ -158,34 +162,29 @@ all-available files still print every result, not only available names.
 python -m unittest -v
 ```
 
-The included tests use local Telegram simulations and temporary databases: random
-batches, no repeats, re-upload deduplication, restart recovery, UTF-8 rollback,
-status mapping, authorization, FloodWait recovery, cooldown persistence, and
-the 50-result button flow, QR expiry/refresh, QR two-step verification, delivery
-diagnostics, resend timing and hashes, code expiry, and reuse of existing
-sessions. A local integration test also exercises Telethon's real QRLogin.wait
-with a simulated scan update, checking that the listener is running before the
-QR is displayed. No test sends a real code or uses a real account. A real
-Telegram login and live availability checks must be tested on your deployment
-with your own credentials.
+Tests cover official mapping, random batches/no repeats, restart/re-upload
+behavior, QR login, HTML parsing, exact username matching, Fragment statuses,
+HTTP errors/rate limits, saved modes, old database migration, 80-name files and
+buttons, switching back to account mode, and startup without a user client.
 
-## Updating an existing checkout
+HTTP tests use representative HTML and httpx.MockTransport, not real accounts.
+Live t.me requests returned access-block pages and Fragment returned HTTP 403 in
+the development environment. Live end-to-end public checks still require a
+server that can reach both sites.
 
-Stop the old process with Ctrl+C, then run these from the repository directory
-with your virtual environment activated:
+## Updating
+
+Stop with Ctrl+C, activate your existing virtual environment, then:
 
 ```bash
 git pull --ff-only
 python -m pip install -r requirements.txt
-python bot.py --login
 python bot.py
 ```
 
-Keep your existing `.env` and `data/` directory. Login reuses an already
-authorized session; do not delete session files or the username database to
-fix a missing code.
+Keep .env and data/. Send `/botonly` for batches of 80 or `/accountmode` for
+official checks. Do not delete sessions or the database to change modes.
 
-Official reference: <https://core.telegram.org/method/account.checkUsername>.
-Login references: <https://core.telegram.org/api/auth> and
-<https://core.telegram.org/api/qr-login>.
+References: https://core.telegram.org/method/account.checkUsername,
+https://core.telegram.org/api/auth, https://core.telegram.org/api/qr-login.
 
