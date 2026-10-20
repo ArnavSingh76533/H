@@ -21,6 +21,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from telethon import Button, TelegramClient, errors, events, functions
 
+from login_flow import login_error, login_user
+
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
 LOG = logging.getLogger("username_checker")
@@ -390,7 +392,7 @@ class BotService:
             await self.run_batch(event)
 
 
-async def main(login: bool):
+async def main(login: bool, login_method: str = "qr"):
     os.umask(0o077)
     api_id = int(os.environ.get("API_ID", "0"))
     api_hash = os.environ.get("API_HASH", "").strip()
@@ -400,14 +402,11 @@ async def main(login: bool):
     data_dir.mkdir(parents=True, exist_ok=True)
     user = TelegramClient(str(data_dir / "checker_user"), api_id, api_hash,
                           flood_sleep_threshold=0, request_retries=5 if login else 0,
-                          raise_last_call_error=True, receive_updates=False)
+                          raise_last_call_error=True, receive_updates=login)
     bot = None
     try:
         if login:
-            await user.start()
-            if await user.is_bot():
-                raise RuntimeError("Checker session must be a USER account, not a bot.")
-            print("User session saved. Now run: python bot.py")
+            await login_user(user, data_dir, method=login_method)
             return
         token = os.environ.get("BOT_TOKEN", "").strip()
         allowed = {int(x) for x in re.split(r"[,\s]+", os.environ.get("ALLOWED_USER_IDS", "")) if x}
@@ -459,17 +458,24 @@ async def main(login: bool):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--login", action="store_true", help="One-time owner account login")
+    login_group = parser.add_mutually_exclusive_group()
+    login_group.add_argument("--login", "--login-qr", dest="login", action="store_true",
+                             help="One-time user login using a QR code (no login code needed)")
+    login_group.add_argument("--login-code", action="store_true",
+                             help="Phone/code login with delivery diagnostics and QR fallback")
     args = parser.parse_args()
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     try:
-        asyncio.run(main(args.login))
+        asyncio.run(main(args.login or args.login_code, "code" if args.login_code else "qr"))
     except KeyboardInterrupt:
         pass
     except Exception as exc:
         # Do not print credential-bearing request objects or session data.
         if isinstance(exc, (RuntimeError, ValueError)):
             print(f"Startup error: {exc}")
+        elif isinstance(exc, errors.RPCError):
+            print(f"Startup error: {login_error(exc)}")
         else:
             print(f"Startup error: {type(exc).__name__}; verify credentials/network and try again.")
         raise SystemExit(1)
+

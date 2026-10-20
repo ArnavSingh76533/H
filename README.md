@@ -51,16 +51,41 @@ bot's ID. Comma-separated IDs allow multiple people, each with their own queue.
 If you need to find your ID, start the configured bot with any numeric allowed
 ID and message it: the unauthorized response displays the sender's ID.
 
-Perform the one-time checker-account login **in your own terminal**:
+Perform the one-time checker-account login **in your own terminal**. QR login
+is the default, so you do not have to wait for a Telegram/SMS code:
 
 ```bash
 python bot.py --login
 ```
 
-Enter your Telegram phone number, login code, and 2FA password if asked. Do not
-enter the bot token at this prompt: this must be a user account. Telegram only
-allows user accounts to call `account.checkUsername`; a bot token alone cannot
-provide this official check. The bot token provides the chat interface.
+On your already logged-in phone, open **Telegram > Settings > Devices > Link
+Desktop Device**, scan the terminal QR from another screen, and approve it.
+If the terminal QR is distorted, open the temporary local `data/login-qr.svg`
+image. This image refreshes when the token expires and is deleted when login
+finishes or is cancelled. A two-step verification password is requested only
+if your account requires one. QR login needs an existing logged-in Telegram
+app; it does not create a new Telegram account.
+
+For phone/code login instead:
+
+```bash
+python bot.py --login-code
+```
+
+The program displays the delivery method Telegram actually returned (Telegram
+service chat, SMS, call, email, or Fragment). If nothing arrives, enter `qr` at
+the code prompt to switch to QR login. Enter `resend` to request the next method
+**only if Telegram offered one and its timer has elapsed**; the script permits
+one explicit resend and never forces SMS or repeatedly requests codes.
+Unsupported official-app-only delivery and expired codes switch to QR login.
+`cancel` exits without completing login. FloodWait displays Telegram's required
+wait in seconds instead of hiding it behind a generic startup error.
+
+Telegram chooses delivery; a script cannot guarantee SMS. Only user accounts
+can call `account.checkUsername`; a bot token alone cannot provide this official
+check. The bot token provides the chat interface. The user session remains in
+the same `data/checker_user.session` file for both login methods and is reused
+when you restart. Never send your login code or 2FA password to another person.
 
 Then run:
 
@@ -133,10 +158,34 @@ all-available files still print every result, not only available names.
 python -m unittest -v
 ```
 
-The included tests use mocked Telegram calls and temporary databases: random
+The included tests use local Telegram simulations and temporary databases: random
 batches, no repeats, re-upload deduplication, restart recovery, UTF-8 rollback,
 status mapping, authorization, FloodWait recovery, cooldown persistence, and
-the 50-result button flow. A real Telegram login and live availability checks
-must be tested on your deployment with your own credentials.
+the 50-result button flow, QR expiry/refresh, QR two-step verification, delivery
+diagnostics, resend timing and hashes, code expiry, and reuse of existing
+sessions. A local integration test also exercises Telethon's real QRLogin.wait
+with a simulated scan update, checking that the listener is running before the
+QR is displayed. No test sends a real code or uses a real account. A real
+Telegram login and live availability checks must be tested on your deployment
+with your own credentials.
+
+## Updating an existing checkout
+
+Stop the old process with Ctrl+C, then run these from the repository directory
+with your virtual environment activated:
+
+```bash
+git pull --ff-only
+python -m pip install -r requirements.txt
+python bot.py --login
+python bot.py
+```
+
+Keep your existing `.env` and `data/` directory. Login reuses an already
+authorized session; do not delete session files or the username database to
+fix a missing code.
 
 Official reference: <https://core.telegram.org/method/account.checkUsername>.
+Login references: <https://core.telegram.org/api/auth> and
+<https://core.telegram.org/api/qr-login>.
+
