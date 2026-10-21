@@ -40,10 +40,19 @@ unassignable usernames can still lack public profiles. Use account mode for the
 official, account-specific result.
 
 Timeouts, HTTP 403/404/5xx, redirects, blocked pages, wrong asset identities and
-unrecognized HTML are **unknown**, never available. HTTP 429 honors Retry-After
+unrecognized Telegram HTML are **unverified**, never available. When the exact
+Telegram contact page matched but the Fragment check could not be verified,
+the result instead says **contact page found; Fragment unverified**. This keeps
+the useful Telegram signal without claiming that registration is possible.
+Unverified results include the failing site and HTTP code, network error, or
+missing page marker. These details are saved and included in /last.
+
+HTTP 429 honors Retry-After
 and saves a separate public-check cooldown. No access challenges are bypassed.
-An unknown result or rate limit stops the batch and preserves unattempted entries.
-This may produce fewer than 80 results; a short final queue also produces a
+Network failures, access blocks, server errors and rate limits stop the batch
+and preserve unattempted entries. An individual unrecognized page layout does
+not stop the batch: its result stays unverified and the next name is checked.
+This may produce fewer than 80 results on a site failure; a short final queue also produces a
 smaller batch. Public page layouts can change.
 
 ## Commands and files

@@ -37,12 +37,13 @@ SPLIT = re.compile(r"[\s,;]+")
 STATUSES = {
     "available": "✅ available",
     "likely_available": "🟢 likely available (web)",
+    "contact_unverified": "🟡 contact page found; Fragment unverified",
     "fragment_taken": "💎 collectible / unavailable",
     "occupied": "❌ taken",
     "purchase": "💎 purchase on Fragment",
     "unavailable": "❌ unavailable for this account",
     "invalid": "⚠ invalid / not assignable",
-    "unknown": "❓ unknown (request failed)",
+    "unknown": "❓ unverified",
     "interrupted": "❓ interrupted (not rechecked)",
 }
 
@@ -95,6 +96,8 @@ class Store:
             """)
             if "mode" not in {r[1] for r in db.execute("PRAGMA table_info(batches)")}:
                 db.execute("ALTER TABLE batches ADD COLUMN mode TEXT NOT NULL DEFAULT 'account'")
+            if "detail" not in {r[1] for r in db.execute("PRAGMA table_info(attempts)")}:
+                db.execute("ALTER TABLE attempts ADD COLUMN detail TEXT NOT NULL DEFAULT ''")
 
     @contextmanager
     def connect(self):
@@ -168,10 +171,14 @@ class Store:
                 "INSERT INTO attempts(batch,owner,username,status,checked_at) VALUES(?,?,?,?,?)",
                 (batch, owner, name, "running", int(time.time()))).lastrowid
 
-    def finish(self, attempt: int, status: str):
+    def finish(self, attempt: int, status: str, detail: str = ""):
         with self.connect() as db:
-            db.execute("UPDATE attempts SET status=?,checked_at=? WHERE id=?",
-                       (status, int(time.time()), attempt))
+            db.execute("UPDATE attempts SET status=?,checked_at=?,detail=? WHERE id=?",
+                       (status, int(time.time()), detail[:240], attempt))
+
+    def details(self, batch: int) -> dict[str, str]:
+        with self.connect() as db:
+            return dict(db.execute("SELECT username,detail FROM attempts WHERE batch=?", (batch,)))
 
     def undo_rejected(self, attempt: int, owner: int, name: str):
         # FLOOD_WAIT rejects the request, so no availability result was obtained.
@@ -310,8 +317,11 @@ class BotService:
         lines = [f"Batch #{batch} — {len(rows)} result(s)"]
         mode = self.store.batch_mode(batch)
         lines.append("Mode: bot-only (t.me + Fragment)" if mode == "botonly" else "Mode: account (official API)")
-        lines.extend(f"{i}. @{name} — {STATUSES.get(status, status)}"
-                     for i, (name, status) in enumerate(rows, 1))
+        details = self.store.details(batch)
+        for i, (name, status) in enumerate(rows, 1):
+            lines.append(f"{i}. @{name} — {STATUSES.get(status, status)}")
+            if status in {"unknown", "contact_unverified"} and details.get(name):
+                lines.append("   " + details[name])
         if note:
             lines.append(note)
         if mode == "botonly":
@@ -357,8 +367,11 @@ class BotService:
                 self.store.finish(attempt, "unknown")
                 self.store.set_note(batch, "Checker error; batch stopped. See server logs.")
                 break
-            self.store.finish(attempt, status)
-            if status == "unknown":
+            detail = str(getattr(checker, "last_detail", "")) if mode == "botonly" else ""
+            self.store.finish(attempt, status, detail)
+            failed = status in {"unknown", "contact_unverified"}
+            stop = mode != "botonly" or getattr(checker, "stop_batch", True)
+            if failed and stop:
                 self.store.set_note(batch, "Request failed, access was blocked, or the page was unrecognized; "
                                     "batch stopped. Remaining entries were preserved.")
                 break

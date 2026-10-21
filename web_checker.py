@@ -125,6 +125,8 @@ class WebChecker:
     def __init__(self, delay: float = 1.0, *, client: httpx.AsyncClient | None = None):
         self.delay = delay
         self.next_request_at = 0.0
+        self.last_detail = ""
+        self.stop_batch = False
         self._owns_client = client is None
         self.client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(15.0, connect=10.0), follow_redirects=False,
@@ -139,6 +141,7 @@ class WebChecker:
     async def _page(self, url: str) -> str | None:
         await asyncio.sleep(max(0, self.next_request_at - time.time()))
         self.next_request_at = time.time() + self.delay
+        site = "Telegram" if urlparse(url).hostname == "t.me" else "Fragment"
 
         async def read_page():
             async with self.client.stream("GET", url) as response:
@@ -148,13 +151,19 @@ class WebChecker:
                     raise WebRateLimited(seconds)
                 if response.status_code != 200:
                     LOG.warning("%s returned HTTP %s", urlparse(url).hostname, response.status_code)
+                    self.last_detail = f"{site}: HTTP {response.status_code}"
+                    self.stop_batch = response.status_code in {401, 403, 407} or response.status_code >= 500
                     return None
                 if "text/html" not in response.headers.get("Content-Type", "").casefold():
+                    self.last_detail = f"{site}: response was not HTML"
+                    self.stop_batch = True
                     return None
                 chunks, size = [], 0
                 async for chunk in response.aiter_bytes():
                     size += len(chunk)
                     if size > MAX_HTML_BYTES:
+                        self.last_detail = f"{site}: response exceeded the size limit"
+                        self.stop_batch = True
                         return None
                     chunks.append(chunk)
                 return b"".join(chunks).decode("utf-8", errors="replace")
@@ -162,11 +171,15 @@ class WebChecker:
         try:
             # Bound decompressed response bytes as well as elapsed time.
             return await asyncio.wait_for(read_page(), timeout=25)
-        except (httpx.HTTPError, OSError, asyncio.TimeoutError):
+        except (httpx.HTTPError, OSError, asyncio.TimeoutError) as exc:
             LOG.warning("%s public-page request failed", urlparse(url).hostname)
+            self.last_detail = f"{site}: network error ({type(exc).__name__})"
+            self.stop_batch = True
             return None
 
     async def check(self, username: str) -> str:
+        self.last_detail = ""
+        self.stop_batch = False
         if not VALID.fullmatch(username):
             return "invalid"
         username = username.lower()
@@ -177,11 +190,27 @@ class WebChecker:
         if state == "occupied":
             return "occupied"
         if state != "contact":
+            self.stop_batch = blocked(soup_for(html))
+            self.last_detail = ("Telegram: blocked/challenge page (HTTP 200)" if self.stop_batch else
+                                "Telegram: HTTP 200, but no matching contact page or profile was recognized")
             return "unknown"
         html = await self._page(f"https://fragment.com/username/{username}")
         if html is None:
-            return "unknown"
+            self.last_detail = "Telegram: contact page matched; " + self.last_detail
+            return "contact_unverified"
         state = fragment_state(html, username)
         if state == "not_listed":
             return "likely_available"
-        return state if state in {"purchase", "fragment_taken"} else "unknown"
+        if state in {"purchase", "fragment_taken"}:
+            return state
+        soup = soup_for(html)
+        self.stop_batch = blocked(soup)
+        if self.stop_batch:
+            reason = "Fragment: blocked/challenge page (HTTP 200)"
+        else:
+            labels = sorted({clean_text(n.get_text(" ", strip=True))[:48]
+                             for n in soup.select(".tm-section-header-status")})
+            reason = ("Fragment: HTTP 200, status=" + "/".join(labels[:2]) + "; asset not verified"
+                      if labels else "Fragment: HTTP 200, asset-status marker not found")
+        self.last_detail = "Telegram: contact page matched; " + reason
+        return "contact_unverified"

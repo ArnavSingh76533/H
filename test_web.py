@@ -121,12 +121,53 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
                         if request.url.host == failure_host:
                             return httpx.Response(status, text="Unavailable")
                         return httpx.Response(200, text=contact(), headers={"Content-Type": "text/html"})
-                    self.assertEqual(await self.check_using(handler), "unknown")
+                    expected = "contact_unverified" if failure_host == "fragment.com" else "unknown"
+                    self.assertEqual(await self.check_using(handler), expected)
 
     async def test_network_timeout_does_not_mean_available(self):
         def handler(request):
             raise httpx.ConnectTimeout("mock timeout", request=request)
         self.assertEqual(await self.check_using(handler), "unknown")
+
+    async def test_fragment_block_reports_successful_telegram_step_and_exact_http_error(self):
+        def handler(request):
+            if request.url.host == "t.me":
+                return httpx.Response(200, text=contact(), headers={"Content-Type": "text/html"})
+            return httpx.Response(403)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            checker = WebChecker(0, client=client)
+            self.assertEqual(await checker.check("testname"), "contact_unverified")
+            self.assertIn("Telegram: contact page matched", checker.last_detail)
+            self.assertIn("Fragment: HTTP 403", checker.last_detail)
+            self.assertTrue(checker.stop_batch)
+
+    async def test_unrecognized_fragment_layout_keeps_contact_signal_without_claiming_free(self):
+        def handler(request):
+            html = contact() if request.url.host == "t.me" else "<html>Unavailable</html>"
+            return httpx.Response(200, text=html, headers={"Content-Type": "text/html"})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            checker = WebChecker(0, client=client)
+            self.assertEqual(await checker.check("testname"), "contact_unverified")
+            self.assertIn("asset-status marker not found", checker.last_detail)
+            self.assertFalse(checker.stop_batch)
+
+    async def test_fragment_status_with_missing_identity_is_explained(self):
+        def handler(request):
+            html = contact() if request.url.host == "t.me" else fragment(name="othername")
+            return httpx.Response(200, text=html, headers={"Content-Type": "text/html"})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            checker = WebChecker(0, client=client)
+            self.assertEqual(await checker.check("testname"), "contact_unverified")
+            self.assertIn("status=unavailable; asset not verified", checker.last_detail)
+
+    async def test_telegram_block_is_distinct_from_contact_signal(self):
+        def handler(request):
+            return httpx.Response(200, text="<title>Site Unavailable</title>", headers={"Content-Type": "text/html"})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            checker = WebChecker(0, client=client)
+            self.assertEqual(await checker.check("testname"), "unknown")
+            self.assertIn("Telegram: blocked", checker.last_detail)
+            self.assertTrue(checker.stop_batch)
 
     async def test_rate_limit_exposes_retry_after_and_sets_cooldown(self):
         def handler(request):
@@ -285,6 +326,36 @@ class ModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.web.check.await_count, 1)
         self.assertEqual(self.store.stats(1), (170, 1, 169))
 
+    async def test_unverified_fragment_layout_continues_80_and_details_survive_restart(self):
+        self.queue()
+        self.web.check.return_value = "contact_unverified"
+        self.web.last_detail = "Telegram: contact page matched; Fragment: HTTP 200, asset-status marker not found"
+        self.web.stop_batch = False
+        await self.service.handle(event("/botonly"))
+        await self.service.handle(event("/next"))
+        self.assertEqual(self.web.check.await_count, 80)
+        batch = self.store.last_batch(1)
+        restarted = Store(self.root / "db")
+        self.assertEqual(set(restarted.details(batch).values()), {self.web.last_detail})
+        self.assertEqual(len(restarted.results(batch)[0]), 80)
+        self.assertEqual(restarted.results(batch)[1], "")
+        self.bot.send_message.reset_mock()
+        await self.service.report(event(), batch)
+        report = "\n".join(call.args[1] for call in self.bot.send_message.await_args_list)
+        self.assertIn("Fragment unverified", report)
+        self.assertIn(self.web.last_detail, report)
+
+    async def test_contact_found_with_fragment_block_stops_and_saves_partial_evidence(self):
+        self.queue()
+        self.web.check.return_value = "contact_unverified"
+        self.web.last_detail = "Telegram: contact page matched; Fragment: HTTP 403"
+        self.web.stop_batch = True
+        await self.service.handle(event("/botonly"))
+        await self.service.handle(event("/next"))
+        self.assertEqual(self.web.check.await_count, 1)
+        self.assertEqual(self.store.stats(1), (170, 1, 169))
+        self.assertIn("Fragment: HTTP 403", next(iter(self.store.details(self.store.last_batch(1)).values())))
+
     async def test_upload_in_botonly_mode_triggers_80(self):
         await self.service.handle(event("/botonly"))
         content = "\n".join(f"name{i:03d}" for i in range(100))
@@ -305,9 +376,13 @@ class ModeTests(unittest.IsolatedAsyncioTestCase):
         with sqlite3.connect(path) as db:
             db.execute("CREATE TABLE batches (id INTEGER PRIMARY KEY, owner INTEGER NOT NULL, note TEXT NOT NULL DEFAULT '')")
             db.execute("INSERT INTO batches(owner,note) VALUES(1,'old result')")
+            db.execute("CREATE TABLE attempts (id INTEGER PRIMARY KEY, batch INTEGER NOT NULL, owner INTEGER NOT NULL, "
+                       "username TEXT NOT NULL, status TEXT NOT NULL, checked_at INTEGER NOT NULL)")
+            db.execute("INSERT INTO attempts(batch,owner,username,status,checked_at) VALUES(1,1,'testname','occupied',1)")
         upgraded = Store(path)
         self.assertEqual(upgraded.batch_mode(1), "account")
-        self.assertEqual(upgraded.results(1), ([], "old result"))
+        self.assertEqual(upgraded.results(1), ([("testname", "occupied")], "old result"))
+        self.assertEqual(upgraded.details(1), {"testname": ""})
 
     async def test_startup_without_user_session_never_constructs_user_client(self):
         bot_client = AsyncMock()
